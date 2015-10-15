@@ -5,7 +5,6 @@ import inspect
 import json
 import logging
 import sqlalchemy
-from collections import OrderedDict
 from functools import wraps
 
 from dorthy.utils import camel_encode, native_str
@@ -20,7 +19,7 @@ def prevent_cycle(f):
     If an object is its own ancestor, raise ValueError, avoiding infinite recursion.
     Stores information about each ancestor to aid in debugging."""
 
-    memo = OrderedDict()
+    memo = collections.OrderedDict()
     @wraps(f)
     def _prevent_cycle(obj, basename, *args, **kw):
         _oid = id(obj)
@@ -46,7 +45,7 @@ def prevent_cycle(f):
 
 
 @prevent_cycle
-def dumps(obj, basename, camel_case=False, ignore_attributes=None, include_collections=None, encoding="utf-8"):
+def dumps(obj, basename, camel_case=False, ignore_attributes=None, include_relationships=None, encoding="utf-8"):
     """
     Provides basic json encoding.  Handles encoding of SQLAlchemy objects
     """
@@ -68,7 +67,7 @@ def dumps(obj, basename, camel_case=False, ignore_attributes=None, include_colle
     elif hasattr(obj, "_as_dict"):
         dict_attr = getattr(obj, "_as_dict")
         if callable(dict_attr):
-            return dumps(dict_attr(), basename, camel_case, ignore_attributes, include_collections, encoding)
+            return dumps(dict_attr(), basename, camel_case, ignore_attributes, include_relationships, encoding)
         else:
             raise ValueError("Invalid _as_dict attribute found on object")
     elif isinstance(obj, (datetime.date, datetime.datetime)):
@@ -81,10 +80,10 @@ def dumps(obj, basename, camel_case=False, ignore_attributes=None, include_colle
             if camel_case:
                 name = camel_encode(name)
             if not ignore_attributes or new_basename not in ignore_attributes:
-                values[name] = dumps(value, new_basename, camel_case, ignore_attributes, include_collections, encoding)
+                values[name] = dumps(value, new_basename, camel_case, ignore_attributes, include_relationships, encoding)
         return values
     elif isinstance(obj, collections.Iterable):
-        return [dumps(val, basename, camel_case, ignore_attributes, include_collections, encoding) for val in obj]
+        return [dumps(val, basename, camel_case, ignore_attributes, include_relationships, encoding) for val in obj]
 
     # Object serializer
 
@@ -107,7 +106,7 @@ def dumps(obj, basename, camel_case=False, ignore_attributes=None, include_colle
         new_basename = _append_path(basename, name)
         if not _is_blacklisted_attribute(new_basename, ignore_attributes):
             if _is_visible_attribute(name, transients):
-                if name in relationships and not _check_whitelist(new_basename, include_collections):
+                if name in relationships and not _check_whitelist(new_basename, include_relationships):
                     # don't handle sqlalchemy relationships not in whitelist
                     continue
                 try:
@@ -115,7 +114,7 @@ def dumps(obj, basename, camel_case=False, ignore_attributes=None, include_colle
                     if _is_visible_type(value):
                         if camel_case:
                             name = camel_encode(name)
-                        values[name] = dumps(value, new_basename, camel_case, ignore_attributes, include_collections, encoding)
+                        values[name] = dumps(value, new_basename, camel_case, ignore_attributes, include_relationships, encoding)
                 except AttributeError:
                     continue
     if not values:
@@ -153,9 +152,9 @@ def _is_visible_attribute(name, transients):
         name in transients)
 
 
-def _check_whitelist(collection, include_collections):
+def _check_whitelist(collection, include_relationships):
     # if there is no whitelist, or collection is whitelisted, this returns true
-    return include_collections is None or collection in include_collections
+    return include_relationships is None or collection in include_relationships
 
 
 def _is_blacklisted_attribute(attribute, ignore_attributes):
@@ -182,22 +181,22 @@ def _is_visible_type(attribute):
 
 class JSONEntityEncoder(json.JSONEncoder):
 
-    def __init__(self, camel_case=False, ignore_attributes=None, encoding="utf-8", include_collections=None, basename=None, **kwargs):
+    def __init__(self, camel_case=False, ignore_attributes=None, encoding="utf-8", include_relationships=None, basename=None, **kwargs):
         super().__init__(**kwargs)
         self.__camel_case = camel_case
         self.__encoding = encoding
         self.__ignore_attributes = ignore_attributes
-        self.__include_collections = include_collections
+        self.__include_relationships = include_relationships
         self.__basename = basename
 
     def encode(self, obj):
-        d = dumps(obj, self.__basename, self.__camel_case, self.__ignore_attributes, self.__include_collections, self.__encoding)
+        d = dumps(obj, self.__basename, self.__camel_case, self.__ignore_attributes, self.__include_relationships, self.__encoding)
         en = super().encode(d)
         return en
 
 
 def jsonify(obj, root=None, camel_case=False, ignore_attributes=None, sort_keys=True,
-            indent=None, encoding="utf-8", include_collections=None, **kwargs):
+            indent=None, encoding="utf-8", include_relationships=None, **kwargs):
     """
     JSONify the object provided
     """
@@ -210,7 +209,7 @@ def jsonify(obj, root=None, camel_case=False, ignore_attributes=None, sort_keys=
                           indent=indent,
                           cls=JSONEntityEncoder,
                           encoding=encoding,
-                          include_collections=include_collections,
+                          include_relationships=include_relationships,
                           **kwargs)
 
     if root:

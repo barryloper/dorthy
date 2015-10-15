@@ -158,7 +158,7 @@ def test_sqlalchemy(gen_sqlalchemy):
     assert '"children": ' not in children_ignored
 
     # enums count as collections and must be whitelisted if a whitelist is provided. fixme?
-    explicit_whitelist = jsonify(gen_sqlalchemy['dad'], include_collections=("children",))
+    explicit_whitelist = jsonify(gen_sqlalchemy['dad'], include_relationships=("children",))
     # parent.children should be included
     assert '"children": [{"id":' in explicit_whitelist
     # parent.children.siblings should not be included
@@ -169,13 +169,13 @@ def test_sqlalchemy(gen_sqlalchemy):
     assert '"parent": ' not in blacklist_attrs_of_children
     assert '"siblings": [{"' in blacklist_attrs_of_children
 
-    whitelist_and_blacklist_together = jsonify(gen_sqlalchemy['dad'], include_collections=("children",),
+    whitelist_and_blacklist_together = jsonify(gen_sqlalchemy['dad'], include_relationships=("children",),
         ignore_attributes=("attrs", ))
-    #sub-relationships are not loaded unless explicitly included when include_collections is specified
+    #sub-relationships are not loaded unless explicitly included when include_relationships is specified
     assert '"children": [{"id":' in whitelist_and_blacklist_together
     assert '"attrs": {' not in whitelist_and_blacklist_together
 
-    sub_collections = jsonify(gen_sqlalchemy['dad'], include_collections=("children", "children.siblings"))
+    sub_collections = jsonify(gen_sqlalchemy['dad'], include_relationships=("children", "children.siblings"))
     assert '"parent": ' not in sub_collections
     assert '"siblings": [' in sub_collections
     assert '"children": [' in sub_collections

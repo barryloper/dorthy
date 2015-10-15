@@ -83,7 +83,7 @@ def consumes(media=MediaTypes.JSON, arg_name="model", underscore_case=True):
     return decorator(_consumes)
 
 
-def produces(media=MediaTypes.JSON, root=None, camel_case=True, ignore_attributes=None, include_collections=None):
+def produces(media=MediaTypes.JSON, root=None, camel_case=True, ignore_attributes=None, include_relationships=None):
 
     def _produces(f, handler, *args, **kwargs):
         handler.media_type = media
@@ -99,7 +99,7 @@ def produces(media=MediaTypes.JSON, root=None, camel_case=True, ignore_attribute
                                       root=root_wrapper,
                                       camel_case=camel_case,
                                       ignore_attributes=ignore_attributes,
-                                      include_collections=include_collections))
+                                      include_relationships=include_relationships))
             elif media == MediaTypes.HTML:
                 handler.write(val)
         return None
