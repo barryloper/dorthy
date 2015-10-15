@@ -4,6 +4,9 @@ import datetime
 import inspect
 import json
 import logging
+import sqlalchemy
+from collections import OrderedDict
+from functools import wraps
 
 from dorthy.utils import camel_encode, native_str
 
@@ -12,7 +15,31 @@ PRIMITIVE_TYPES = (bool, int, float, str)
 logger = logging.getLogger(__name__)
 
 
-def dumps(obj, basename, camel_case=False, ignore_attributes=None, encoding="utf-8"):
+def memoize(f):
+    memo = OrderedDict()
+    @wraps(f)
+    def _memoize(obj, basename, *args, **kw):
+        # fixme? will memo get cleared if an exception is raised and caught from dumps()
+        _oid = id(obj)
+        if _oid not in memo:
+            if len(memo) == 0:
+                memo[_oid] = basename or '$root'
+            else:
+                memo[_oid] = basename or type(obj)
+            retval = f(obj, basename, *args, **kw)
+            memo.popitem()
+            return retval
+        else:
+            verb = 'contains' if isinstance(obj, (collections.Iterable, collections.Mapping, dict)) else 'is'
+            memo_name = memo[_oid]
+            memo.clear()
+            raise ValueError("Circular reference detected: {} {} parent {}".format(basename or type(obj), verb, memo_name))
+
+    return _memoize
+
+
+@memoize
+def dumps(obj, basename, camel_case=False, ignore_attributes=None, include_collections=None, encoding="utf-8"):
     """
     Provides basic json encoding.  Handles encoding of SQLAlchemy objects
     """
@@ -34,7 +61,7 @@ def dumps(obj, basename, camel_case=False, ignore_attributes=None, encoding="utf
     elif hasattr(obj, "_as_dict"):
         dict_attr = getattr(obj, "_as_dict")
         if callable(dict_attr):
-            return dumps(dict_attr(), basename, camel_case, ignore_attributes, encoding)
+            return dumps(dict_attr(), basename, camel_case, ignore_attributes, include_collections, encoding)
         else:
             raise ValueError("Invalid _as_dict attribute found on object")
     elif isinstance(obj, (datetime.date, datetime.datetime)):
@@ -47,26 +74,41 @@ def dumps(obj, basename, camel_case=False, ignore_attributes=None, encoding="utf
             if camel_case:
                 name = camel_encode(name)
             if not ignore_attributes or new_basename not in ignore_attributes:
-                values[name] = dumps(value, new_basename, camel_case, ignore_attributes, encoding)
+                values[name] = dumps(value, new_basename, camel_case, ignore_attributes, include_collections, encoding)
         return values
     elif isinstance(obj, collections.Iterable):
-        return [dumps(val, basename, camel_case, ignore_attributes, encoding) for val in obj]
+        return [dumps(val, basename, camel_case, ignore_attributes, include_collections, encoding) for val in obj]
 
-    values = dict()
+    # Object serializer
+
+    values = {}
     transients = _get_transients(obj)
-    serializable = dir(obj)
+
+    # special handling for sqlalchemy objects
+    try:
+        mapper = sqlalchemy.inspect(obj).mapper
+        serializable = mapper.all_orm_descriptors.keys()
+        relationships = mapper.relationships.keys()
+    except sqlalchemy.exc.NoInspectionAvailable:
+        serializable = dir(obj)
+        relationships = []
+        pass
 
     for name in serializable:
-        if _is_visible_attribute(obj, name, transients):
-            try:
-                value = obj.__getattribute__(name)
-                new_basename = _append_path(basename, name)
-                if _is_visible_type(value) and (not ignore_attributes or new_basename not in ignore_attributes):
-                    if camel_case:
-                        name = camel_encode(name)
-                    values[name] = dumps(value, new_basename, camel_case, ignore_attributes, encoding)
-            except Exception:
-                continue
+        new_basename = _append_path(basename, name)
+        if not _is_blacklisted_attribute(new_basename, ignore_attributes):
+            if _is_visible_attribute(name, transients):
+                if name in relationships and not _check_whitelist(new_basename, include_collections):
+                    # don't handle sqlalchemy relationships not in whitelist
+                    continue
+                try:
+                    value = obj.__getattribute__(name)  # why not use getattr(obj, name) or even obj.name?
+                    if _is_visible_type(value):
+                        if camel_case:
+                            name = camel_encode(name)
+                        values[name] = dumps(value, new_basename, camel_case, ignore_attributes, include_collections, encoding)
+                except AttributeError:
+                    continue
     if not values:
         return str(obj)
     else:
@@ -97,10 +139,19 @@ def _append_path(basename, name):
         return native_str(name)
 
 
-def _is_visible_attribute(obj, name, transients):
+def _is_visible_attribute(name, transients):
     return not(name.startswith("_") or
-        name in transients or
-        (_is_saobject(obj) and name == "metadata"))
+        name in transients)
+
+
+def _check_whitelist(collection, include_collections):
+    # if there is no whitelist, or collection is whitelisted, this returns true
+    return include_collections is None or collection in include_collections
+
+
+def _is_blacklisted_attribute(attribute, ignore_attributes):
+    # if there is a blacklist and the attribute is in it, this returns true
+    return ignore_attributes is not None and attribute in ignore_attributes
 
 
 def _is_visible_type(attribute):
@@ -120,40 +171,40 @@ def _is_visible_type(attribute):
                inspect.ismemberdescriptor(attribute))
 
 
-def _is_saobject(obj):
-    return hasattr(obj, "_sa_class_manager")
-
-
 class JSONEntityEncoder(json.JSONEncoder):
 
-    def __init__(self, camel_case=False, ignore_attributes=None, encoding="utf-8", **kwargs):
+    def __init__(self, camel_case=False, ignore_attributes=None, encoding="utf-8", include_collections=None, basename=None, **kwargs):
         super().__init__(**kwargs)
         self.__camel_case = camel_case
         self.__encoding = encoding
         self.__ignore_attributes = ignore_attributes
+        self.__include_collections = include_collections
+        self.__basename = basename
 
     def encode(self, obj):
-        d = dumps(obj, "", self.__camel_case, self.__ignore_attributes, self.__encoding)
+        d = dumps(obj, self.__basename, self.__camel_case, self.__ignore_attributes, self.__include_collections, self.__encoding)
         en = super().encode(d)
         return en
 
 
 def jsonify(obj, root=None, camel_case=False, ignore_attributes=None, sort_keys=True,
-            indent=None, encoding="utf-8", **kwargs):
+            indent=None, encoding="utf-8", include_collections=None, **kwargs):
     """
     JSONify the object provided
     """
-    # add root to the base of ignore_attributes
+
+    json_out = json.dumps(obj,
+                          camel_case=camel_case,
+                          ignore_attributes=ignore_attributes,
+                          skipkeys=True,
+                          sort_keys=sort_keys,
+                          indent=indent,
+                          cls=JSONEntityEncoder,
+                          encoding=encoding,
+                          include_collections=include_collections,
+                          **kwargs)
+
     if root:
-        if ignore_attributes:
-            ignore_attributes = ["{}.{}".format(root, val) for val in ignore_attributes]
-        obj = {root: obj}
-    return json.dumps(obj,
-                      camel_case=camel_case,
-                      ignore_attributes=ignore_attributes,
-                      skipkeys=True,
-                      sort_keys=sort_keys,
-                      indent=indent,
-                      cls=JSONEntityEncoder,
-                      encoding=encoding,
-                      **kwargs)
+        return '{{"{!s}": {!s}}}'.format(root, json_out)
+    else:
+        return json_out
