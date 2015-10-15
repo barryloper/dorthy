@@ -1,6 +1,6 @@
 import pytest
 from dorthy.json import jsonify
-from sqlalchemy import Column, String, Integer, ForeignKey
+from sqlalchemy import Column, String, Integer, ForeignKey, Table
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.ext.declarative import declarative_base
@@ -11,6 +11,9 @@ from datetime import datetime
 import pytz
 
 Base = declarative_base()
+
+# todo: more test cases
+# todo: check what happens to memo when dumps() raises an externally-handled exception
 
 
 @pytest.fixture
@@ -35,11 +38,20 @@ def gen_sqlalchemy():
         Option1 = "option1"
         Option2 = "option2"
 
+    siblings = Table('siblings', Base.metadata,
+        Column("left_sibling_id", Integer, ForeignKey("child.id"), primary_key=True),
+        Column("right_sibling_id", Integer, ForeignKey("child.id"), primary_key=True)
+    )
+
     class ChildEntity(Base):
         __tablename__ = "child"
         id = Column(Integer, primary_key=True)
         name = Column(String)
         parent_id = Column(Integer, ForeignKey("parent.id"))
+        siblings = relationship("ChildEntity",
+                    secondary="siblings",
+                    primaryjoin="ChildEntity.id==siblings.c.left_sibling_id",
+                    secondaryjoin="siblings.c.right_sibling_id==ChildEntity.id")
 
     class ParentEntity(Base):
         __tablename__ = "parent"
@@ -57,6 +69,8 @@ def gen_sqlalchemy():
     dad = ParentEntity(name="Dad", attrs={"att1": "val1", "attr2": 2}, option=Enum.Option1)
     bobby = ChildEntity(name="Bobby", parent=dad)
     judy = ChildEntity(name="Judy", parent=dad)
+    jane = ChildEntity(name="Jane", parent=dad)
+    bobby.siblings = [judy, jane]
 
     return {'dad': dad, 'bobby': bobby, 'judy': judy}
 
@@ -132,45 +146,61 @@ def test_jsonify_generic_obj(gen_obj):
                                 '{"name": "Trudy"}, {"name": "JimBob", "siblings": ' + \
                                 '[{"name": "Bobby", "siblings": null}]}], "name": "Dad"}'
 
-    #whitelist_collections = jsonify(gen_obj["jimbob"], include_collections=set())
-    #assert whitelist_collections == '{"name": "JimBob", "parent": null}'
-
-    # parent is ignored, but siblings.parent is not
-    #blacklist_attributes = jsonify(gen_obj["jimbob"], ignore_attributes=("parent", ), include_collections=("siblings", "siblings.cousins" ))
-    #assert blacklist_attributes == '{"name": "JimBob", "siblings": [{"cousins": null, "name": "Bobby", "parent": {"name": "Dad"}, "siblings": null}]}'
-
 
 def test_sqlalchemy(gen_sqlalchemy):
-
     with pytest.raises(ValueError) as excinfo:
         bad_out = jsonify(gen_sqlalchemy['dad'], basename="bad_dad")
     assert str(excinfo.value) == "Circular reference detected: bad_dad.children.parent is parent bad_dad"
 
     children_ignored = jsonify(gen_sqlalchemy['dad'], ignore_attributes=("children", ))
-    assert children_ignored == '{"attrs": {"att1": "val1", "attr2": 2}, "hidden_attr": "peekaboo", "id": null, "name": "Dad", "option": ' + \
-                               '{"description": null, "name": "Option1", "value": "option1"}}'
+    for attr in ("attrs", "name", "Dad", "description"):
+        assert attr in children_ignored
+    assert '"children": ' not in children_ignored
 
     # enums count as collections and must be whitelisted if a whitelist is provided. fixme?
-    explicit_whitelist = jsonify(gen_sqlalchemy['dad'], include_collections=("attrs", "option"))
-    assert explicit_whitelist == '{"attrs": {"att1": "val1", "attr2": 2}, "hidden_attr": "peekaboo", "id": null, "name": "Dad", "option": ' + \
-                                 '{"description": null, "name": "Option1", "value": "option1"}}'
+    explicit_whitelist = jsonify(gen_sqlalchemy['dad'], include_collections=("children",))
+    # parent.children should be included
+    assert '"children": [{"id":' in explicit_whitelist
+    # parent.children.siblings should not be included
+    assert '"siblings"' not in explicit_whitelist
 
 
-    blacklist_attrs_of_children = jsonify(gen_sqlalchemy['dad'], ignore_attributes=("children.parent", ))
-    assert blacklist_attrs_of_children == '{"attrs": {"att1": "val1", "attr2": 2}, ' + \
-                                          '"children": [{"id": null, "name": "Bobby", "parent_id": null}, ' + \
-                                          '{"id": null, "name": "Judy", "parent_id": null}], "hidden_attr": "peekaboo", ' + \
-                                          '"id": null, "name": "Dad", ' + \
-                                          '"option": {"description": null, "name": "Option1", "value": "option1"}}'
+    blacklist_attrs_of_children = jsonify(gen_sqlalchemy['dad'], ignore_attributes=("children.parent", "children.siblings.parent" ))
+    assert '"parent": ' not in blacklist_attrs_of_children
+    assert '"siblings": [{"' in blacklist_attrs_of_children
 
-    whitelist_and_blacklist_together = jsonify(gen_sqlalchemy['dad'], include_collections=("children",))
+    whitelist_and_blacklist_together = jsonify(gen_sqlalchemy['dad'], include_collections=("children",),
+        ignore_attributes=("attrs", ))
     #sub-relationships are not loaded unless explicitly included when include_collections is specified
-    assert whitelist_and_blacklist_together == '{"attrs": {"att1": "val1", "attr2": 2}, ' + \
-                '"children": [{"id": null, "name": "Bobby", "parent_id": null}, ' + \
-                             '{"id": null, "name": "Judy", "parent_id": null}], ' + \
-                             '"hidden_attr": "peekaboo", "id": null, "name": "Dad", ' + \
-                             '"option": {"description": null, "name": "Option1", "value": "option1"}}'
+    assert '"children": [{"id":' in whitelist_and_blacklist_together
+    assert '"attrs": {' not in whitelist_and_blacklist_together
 
     sub_collections = jsonify(gen_sqlalchemy['dad'], include_collections=("children", "children.siblings"))
-    print(sub_collections)
-# todo: more test cases
+    assert '"parent": ' not in sub_collections
+    assert '"siblings": [' in sub_collections
+    assert '"children": [' in sub_collections
+
+
+def test_json_attribute():
+
+    class InvalidJSON(object):
+        _json = [1,2,3]
+
+    ij = InvalidJSON()
+    with pytest.raises(ValueError) as excinfo:
+        bad_out = jsonify(ij)
+    assert "Invalid _json" in str(excinfo.value)
+
+    class ValidJSONStr(object):
+        _json = "a string"
+
+    assert '"a string"' == jsonify(ValidJSONStr())
+
+    class ValidJSONFun(object):
+        _objData = "a json function"
+
+        def _json(self):
+            return self._objData
+
+    assert '"a json function"' == jsonify(ValidJSONFun())
+

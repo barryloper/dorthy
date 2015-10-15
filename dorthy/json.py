@@ -15,30 +15,37 @@ PRIMITIVE_TYPES = (bool, int, float, str)
 logger = logging.getLogger(__name__)
 
 
-def memoize(f):
+def prevent_cycle(f):
+    """Creates a memo of object ids that are ancestors of the object being encoded.
+    If an object is its own ancestor, raise ValueError, avoiding infinite recursion.
+    Stores information about each ancestor to aid in debugging."""
+
     memo = OrderedDict()
     @wraps(f)
-    def _memoize(obj, basename, *args, **kw):
-        # fixme? will memo get cleared if an exception is raised and caught from dumps()
+    def _prevent_cycle(obj, basename, *args, **kw):
         _oid = id(obj)
         if _oid not in memo:
-            if len(memo) == 0:
+            if len(memo) == 0:  # pick a name for the root of the tree
                 memo[_oid] = basename or '$root'
-            else:
+            else:  # assign some name to objects with no basename to help with debugging
                 memo[_oid] = basename or type(obj)
-            retval = f(obj, basename, *args, **kw)
-            memo.popitem()
-            return retval
+            try:
+                retval = f(obj, basename, *args, **kw)
+                memo.popitem()
+                return retval
+            except:  # ensure the memo is cleared if something goes wrong in dumps()
+                memo.clear()
+                raise
         else:
             verb = 'contains' if isinstance(obj, (collections.Iterable, collections.Mapping, dict)) else 'is'
             memo_name = memo[_oid]
             memo.clear()
             raise ValueError("Circular reference detected: {} {} parent {}".format(basename or type(obj), verb, memo_name))
 
-    return _memoize
+    return _prevent_cycle
 
 
-@memoize
+@prevent_cycle
 def dumps(obj, basename, camel_case=False, ignore_attributes=None, include_collections=None, encoding="utf-8"):
     """
     Provides basic json encoding.  Handles encoding of SQLAlchemy objects
@@ -87,12 +94,14 @@ def dumps(obj, basename, camel_case=False, ignore_attributes=None, include_colle
     # special handling for sqlalchemy objects
     try:
         mapper = sqlalchemy.inspect(obj).mapper
-        serializable = mapper.all_orm_descriptors.keys()
+        # serializable = mapper.all_orm_descriptors.keys()
         relationships = mapper.relationships.keys()
+        transients.add('metadata')
     except sqlalchemy.exc.NoInspectionAvailable:
-        serializable = dir(obj)
         relationships = []
         pass
+
+    serializable = dir(obj)
 
     for name in serializable:
         new_basename = _append_path(basename, name)
